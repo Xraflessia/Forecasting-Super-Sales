@@ -10,117 +10,143 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-# Title
+st.set_page_config(page_title="Dashboard Forecasting", layout="wide")
+
+# ====================== #
+#      Load Data         #
+# ====================== #
+@st.cache_data
+def load_data():
+    df = pd.read_csv("train.csv", encoding="ISO-8859-1")
+    df['Order Date'] = pd.to_datetime(df['Order Date'], dayfirst=True)
+    monthly = df.groupby(pd.Grouper(key='Order Date', freq='M'))['Sales'].sum().reset_index()
+    monthly.set_index('Order Date', inplace=True)
+    monthly = monthly.asfreq('M')
+    return monthly
+
+monthly_sales = load_data()
+
+# ====================== #
+#     Tampilan Header    #
+# ====================== #
 st.title("📊 Dashboard Forecasting Penjualan Superstore")
 st.caption("Model Perbandingan: SARIMAX vs XGBoost | Dataset: train.csv")
 
-# Load Data
-df = pd.read_csv("train.csv", encoding="ISO-8859-1")
-df['Order Date'] = pd.to_datetime(df['Order Date'], dayfirst=True)
-monthly_sales = df.groupby(pd.Grouper(key='Order Date', freq='M'))['Sales'].sum().reset_index()
-monthly_sales.set_index('Order Date', inplace=True)
-monthly_sales = monthly_sales.asfreq('M')
+with st.expander("🔍 Lihat Data Penjualan Bulanan"):
+    st.dataframe(monthly_sales)
 
-# Split Data
-train = monthly_sales[:'2016']
-test = monthly_sales['2017':]
+# ====================== #
+#     Tombol Jalankan    #
+# ====================== #
+run = st.button("🔁 Jalankan Forecasting")
 
-# SARIMAX
-model_sarimax = SARIMAX(train, order=(1,1,1), seasonal_order=(1,1,1,12),
-                         enforce_stationarity=False, enforce_invertibility=False)
-results_sarimax = model_sarimax.fit(disp=False)
-forecast_sarimax = results_sarimax.predict(start=len(train), end=len(train)+len(test)-1, dynamic=False)
-forecast_sarimax = pd.Series(forecast_sarimax, index=test.index)
+if run:
+    train = monthly_sales[:'2016']
+    test = monthly_sales['2017':]
 
-rmse_sarimax = np.sqrt(mean_squared_error(test, forecast_sarimax))
-mae_sarimax = mean_absolute_error(test, forecast_sarimax)
+    # ====================== #
+    #     Model SARIMAX      #
+    # ====================== #
+    @st.cache_resource
+    def train_sarimax(train_data):
+        model = SARIMAX(train_data, order=(1,1,1), seasonal_order=(1,1,1,12),
+                        enforce_stationarity=False, enforce_invertibility=False)
+        return model.fit(disp=False)
 
-# XGBoost
-monthly_sales_ml = monthly_sales.copy()
-monthly_sales_ml['month'] = monthly_sales_ml.index.month
-monthly_sales_ml['year'] = monthly_sales_ml.index.year
+    with st.spinner("Melatih SARIMAX..."):
+        results_sarimax = train_sarimax(train)
+        forecast_sarimax = results_sarimax.predict(
+            start=len(train), end=len(train)+len(test)-1, dynamic=False
+        )
+        forecast_sarimax = pd.Series(forecast_sarimax, index=test.index)
+        rmse_sarimax = np.sqrt(mean_squared_error(test, forecast_sarimax))
+        mae_sarimax = mean_absolute_error(test, forecast_sarimax)
 
-X = monthly_sales_ml[['month', 'year']]
-y = monthly_sales_ml['Sales']
+    # ====================== #
+    #     Model XGBoost      #
+    # ====================== #
+    monthly_ml = monthly_sales.copy()
+    monthly_ml['month'] = monthly_ml.index.month
+    monthly_ml['year'] = monthly_ml.index.year
 
-X_train, X_test = X[:'2016'], X['2017':]
-y_train, y_test = y[:'2016'], y['2017':]
+    X = monthly_ml[['month', 'year']]
+    y = monthly_ml['Sales']
 
-model_xgb = xgb.XGBRegressor(n_estimators=100, learning_rate=0.1)
-model_xgb.fit(X_train, y_train)
-forecast_xgb = model_xgb.predict(X_test)
-forecast_xgb = pd.Series(forecast_xgb, index=y_test.index)
+    X_train, X_test = X[:'2016'], X['2017':]
+    y_train, y_test = y[:'2016'], y['2017':]
 
-rmse_xgb = np.sqrt(mean_squared_error(y_test, forecast_xgb))
-mae_xgb = mean_absolute_error(y_test, forecast_xgb)
+    @st.cache_resource
+    def train_xgb(X, y):
+        model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.1)
+        model.fit(X, y)
+        return model
 
-# Plot Forecasting
-st.subheader("📈 Visualisasi Forecasting")
-fig, ax = plt.subplots(figsize=(12, 5))
-ax.plot(train.index, train['Sales'], label='Train', color='blue')
-ax.plot(test.index, test['Sales'], label='Actual (Test)', color='orange')
-ax.plot(test.index, forecast_sarimax, label='Forecast SARIMAX', color='green')
-ax.plot(test.index, forecast_xgb, label='Forecast XGBoost', color='purple', linestyle='--')
-ax.set_title("Forecasting Penjualan Superstore: SARIMAX vs XGBoost")
-ax.set_xlabel("Tanggal")
-ax.set_ylabel("Penjualan")
-ax.legend()
-ax.grid(True)
-st.pyplot(fig)
+    with st.spinner("Melatih XGBoost..."):
+        model_xgb = train_xgb(X_train, y_train)
+        forecast_xgb = model_xgb.predict(X_test)
+        forecast_xgb = pd.Series(forecast_xgb, index=y_test.index)
+        rmse_xgb = np.sqrt(mean_squared_error(y_test, forecast_xgb))
+        mae_xgb = mean_absolute_error(y_test, forecast_xgb)
 
-# Metrics
-st.subheader("🔢 Metrik Evaluasi Model")
+    # ====================== #
+    #     Visualisasi        #
+    # ====================== #
+    st.subheader("📈 Visualisasi Forecasting")
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(train.index, train['Sales'], label='Train', color='blue')
+    ax.plot(test.index, test['Sales'], label='Actual (Test)', color='orange')
+    ax.plot(test.index, forecast_sarimax, label='Forecast SARIMAX', color='green')
+    ax.plot(test.index, forecast_xgb, label='Forecast XGBoost', color='purple', linestyle='--')
+    ax.set_title("Forecasting Penjualan Superstore: SARIMAX vs XGBoost")
+    ax.set_xlabel("Tanggal")
+    ax.set_ylabel("Penjualan")
+    ax.legend()
+    ax.grid(True)
+    st.pyplot(fig)
 
-col1, col2 = st.columns(2)
-with col1:
-    st.metric("SARIMAX RMSE", f"{rmse_sarimax:,.2f}")
-    st.metric("SARIMAX MAE", f"{mae_sarimax:,.2f}")
-with col2:
-    st.metric("XGBoost RMSE", f"{rmse_xgb:,.2f}")
-    st.metric("XGBoost MAE", f"{mae_xgb:,.2f}")
+    # ====================== #
+    #     Evaluasi Model     #
+    # ====================== #
+    st.subheader("🔢 Metrik Evaluasi Model")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("SARIMAX RMSE", f"{rmse_sarimax:,.2f}")
+        st.metric("SARIMAX MAE", f"{mae_sarimax:,.2f}")
+    with col2:
+        st.metric("XGBoost RMSE", f"{rmse_xgb:,.2f}")
+        st.metric("XGBoost MAE", f"{mae_xgb:,.2f}")
 
-# Interpretasi & Kesimpulan
-st.subheader("🧠 Interpretasi dan Analisis Model")
+    # ====================== #
+    #   Interpretasi Model   #
+    # ====================== #
+    st.subheader("🧠 Interpretasi dan Analisis Model")
 
-st.markdown("""
-Berdasarkan hasil **forecasting penjualan bulanan** dari dataset Superstore, kita membandingkan dua model: **SARIMAX** dan **XGBoost**.
-
-Berikut adalah hasil evaluasinya:
-
-- **SARIMAX**:
-  - Lebih cocok untuk data deret waktu dengan pola musiman dan tren yang jelas.
-  - Menghasilkan **RMSE lebih rendah** dan **MAE lebih rendah**, yang menunjukkan prediksi lebih dekat ke data aktual secara konsisten.
-
-- **XGBoost**:
-  - Model machine learning berbasis pohon yang fleksibel dan mampu menangkap pola non-linier.
-  - Cocok digunakan jika terdapat **variabel eksternal lain** seperti promosi, cuaca, atau kategori produk yang relevan.
-  - Dalam kasus ini, hanya menggunakan fitur `bulan` dan `tahun`, sehingga performanya masih di bawah SARIMAX.
-
-🔍 **Analisis Visual**:
-- Garis prediksi SARIMAX (hijau) cukup stabil dan mengikuti tren musiman data aktual.
-- Garis prediksi XGBoost (ungu putus-putus) cenderung lebih fleksibel, tetapi terkadang terlalu merespons fluktuasi kecil, menyebabkan over/underestimate.
-
----
-
-### 📌 Kesimpulan:
-
-""")
-
-if rmse_sarimax < rmse_xgb and mae_sarimax < mae_xgb:
-    st.success("✅ Model terbaik: **SARIMAX**")
     st.markdown("""
-    SARIMAX memberikan hasil prediksi yang lebih akurat untuk dataset ini. Model ini disarankan apabila fokus hanya pada data historis penjualan tanpa variabel eksternal tambahan.
+    Berdasarkan hasil **forecasting penjualan bulanan**, berikut perbandingan kedua model:
+
+    - **SARIMAX**:
+        - Lebih cocok untuk data musiman dan tren historis.
+        - Performa lebih akurat jika tanpa fitur eksternal.
+    - **XGBoost**:
+        - Cocok jika ingin menambahkan variabel eksternal.
+        - Performa cukup baik, tapi lebih rawan overfit bila fitur terbatas.
+
+    🔍 **Analisis Visual**:
+    - SARIMAX (hijau) mengikuti tren dan musiman.
+    - XGBoost (ungu putus-putus) cenderung responsif terhadap fluktuasi kecil.
+
+    ---
+
+    ### 📌 Kesimpulan:
     """)
-elif rmse_xgb < rmse_sarimax and mae_xgb < mae_sarimax:
-    st.success("✅ Model terbaik: **XGBoost**")
-    st.markdown("""
-    XGBoost menunjukkan hasil lebih baik. Model ini cocok untuk memperluas prediksi di masa depan terutama jika ingin menggabungkan faktor eksternal (misalnya: diskon, kategori produk, hari libur).
-    """)
+
+    if rmse_sarimax < rmse_xgb and mae_sarimax < mae_xgb:
+        st.success("✅ Model terbaik: **SARIMAX**")
+    elif rmse_xgb < rmse_sarimax and mae_xgb < mae_sarimax:
+        st.success("✅ Model terbaik: **XGBoost**")
+    else:
+        st.info("⚖️ Keduanya memiliki performa yang mirip.")
+
+    st.caption("📚 Catatan: RMSE = Root Mean Squared Error, MAE = Mean Absolute Error.")
 else:
-    st.info("⚖️ Keduanya memiliki performa yang mirip.")
-    st.markdown("""
-    Baik SARIMAX maupun XGBoost memberikan hasil prediksi yang seimbang. Pemilihan dapat didasarkan pada kompleksitas data dan kebutuhan fitur eksternal.
-    """)
-
-st.caption("📚 Catatan: RMSE mengukur rata-rata kesalahan kuadrat, sedangkan MAE mengukur rata-rata selisih absolut. Semakin kecil nilainya, semakin baik model.")
-
+    st.info("Klik tombol '🔁 Jalankan Forecasting' untuk memulai proses.")
